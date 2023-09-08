@@ -1,0 +1,668 @@
+<html>
+
+<head>
+    <title>Helios Timelock Dapp</title>
+    <script type="text/javascript" src="https://unpkg.com/json-url@2.3.1/dist/browser/json-url.js"></script>    
+    <script>
+        //if you change maintainer, or helios code this will change!
+        const smartContractAddress="addr_test1zrlm8nxynh6k3nkehfz6fa3haj40sgmyr8n7xrc0ezq0k28nawvrn7emu0nxkvcte8fjz02f3s7krg07fvekn8cymnjsanplsx"
+        const amountToLock=2000000;
+        let handleLock = () => { };
+        let handleUnlock = () => { };
+
+        async function main() {
+            const mock=!true;
+            //GameChanger Scripts (GCScripts) are compressed using: https://www.npmjs.com/package/json-url
+            const lzma = JsonUrl('lzma'); // JsonUrl is added to the window object 
+            const Buffer = (await import("https://cdn.skypack.dev/buffer@6.0.3")).default.Buffer;                        
+
+            const storageId = "timelock";
+            const storageDefaults = { eutxos: {} };
+            function redirect (url) {
+                window.open(url,"_self");
+                // var link = document.createElement('a');
+                // link.href = url;
+                // document.body.appendChild(link);
+                // link.click();
+            }      
+            function htmlToElement(html) {
+                var template = document.createElement('template');
+                html = html.trim(); // Never return a text node of whitespace as the result
+                template.innerHTML = html;
+                return template.content.firstChild;
+            }
+            async function getEUTXOsFromAddress(address){
+                const response= await fetch("https://d.graphql-api.iohk-preprod.dandelion.link/", {
+                    "headers":{
+                        "content-type": "application/json"
+                    },
+                    "body": "{\"operationName\":\"GetUtxos\",\"variables\":{\"where\":{\"_and\":[{\"address\":{\"_eq\":\"addr_test1zrlm8nxynh6k3nkehfz6fa3haj40sgmyr8n7xrc0ezq0k28nawvrn7emu0nxkvcte8fjz02f3s7krg07fvekn8cymnjsanplsx\"}}]}},\"query\":\"query GetUtxos($where: TransactionOutput_bool_exp) {\\n  utxos(where: $where) {\\n    txHash\\n    index\\n    value\\n  }\\n}\\n\"}",
+                    "method": "POST",
+                    "mode": "cors"
+                });
+                return (await response.json())?.data?.utxos||[];
+            }
+            async function syncEUTXOs(){
+                const eutxos=await getEUTXOsFromAddress(smartContractAddress);
+                if(eutxos?.length===0)
+                    return;
+                unregisterAllLocks();
+                eutxos.forEach(eutxo=>{
+                    registerLock(eutxo);
+                });
+                updateUI();
+            }
+            function registerLock({ txHash, index, value }) {
+                if (!txHash)
+                    return;
+                const dappStorage = JSON.parse(localStorage.getItem(storageId)) || storageDefaults;
+                dappStorage.eutxos[`${txHash}.${index}`] = {  txHash, index, value };
+                localStorage.setItem(storageId, JSON.stringify(dappStorage))
+            }
+            function unregisterAllLocks() {
+                const dappStorage = JSON.parse(localStorage.getItem(storageId)) || storageDefaults;
+                dappStorage.eutxos={};
+                localStorage.setItem(storageId, JSON.stringify(dappStorage))
+            }
+            function unregisterLock({ txHash, index }) {
+                const dappStorage = JSON.parse(localStorage.getItem(storageId)) || storageDefaults;
+                delete dappStorage.eutxos[`${txHash}.${index}`];
+                localStorage.setItem(storageId, JSON.stringify(dappStorage))
+            }
+            function getLock(lockId) {
+                const dappStorage = JSON.parse(localStorage.getItem(storageId)) || storageDefaults;
+                return dappStorage.eutxos[lockId];
+            }
+            function listRegisteredLocks() {
+                const dappStorage = JSON.parse(localStorage.getItem(storageId)) || storageDefaults;
+                return Object.values(dappStorage.eutxos);
+            }
+            async function updateUI() {
+                const locks = listRegisteredLocks();
+                const locksContainer = document.getElementById("locks");
+                const depositBtn = document.getElementById("depositBtn");
+                depositBtn.innerHTML=`Deposit ${parseInt(amountToLock/1000000)} coins`;
+                locksContainer.innerHTML = "";
+                if(locks.length===0)
+                    locksContainer.innerHTML = "no deposits yet";
+                else
+                    locks.map((lock, lockIndex) => {
+                        const lockElement = htmlToElement(`
+                            <button title='${JSON.stringify(lock, null, 2)}' onclick="handleUnlock('${lock.txHash}.${lock.index}')">
+                                #${lockIndex} Withdraw ${parseInt(lock.value)/1000000} coins 
+                            </button>`)
+                        locksContainer.appendChild(lockElement);
+                    });
+                //handleLock = mockedLock;
+                handleLock = lock;
+                handleUnlock = unlock;
+            }
+
+            function run(code) {
+                //generates the URL that is packed with the script
+                lzma.compress({
+                    //This is a patch to adapt the return URL of the script to the origin that is hosting this html file.
+                    //so this way executed scripts data exports can be captured back on dapp side
+                    returnURLPattern:window.location.origin,
+                    //former gcscript (json scripting)
+                    ...code,
+                })
+                    .then(gcscript => {   
+                        const url="https://beta-preprod-wallet.gamechanger.finance/api/2/run/" + gcscript             
+                        window.location.href=url;
+                        // //redirect(url);     
+                        // const link = document.getElementById("dapp-connector");
+                        // link.href = "https://beta-preprod-wallet.gamechanger.finance/api/2/run/" + gcscript;
+                        // link.innerHTML = "<h2>Run</h2>"
+                    })
+                    .catch(err => {
+                        alert("Error: " + err.message)
+                    });
+            }
+
+            function captureExports() {
+                //GameChanger Wallet supports arbitrary data returning from script execution, encoded in a redirect URL
+                //Head to https://beta-preprod-wallet.gamechanger.finance/doc/api/v2/api.html#returnURLPattern to learn ways how to customize this URL
+
+                //Always design your scripts in such a way you avoid leaking sensitive information.
+                //Building wallet-agnostic (user-agnostic) scripts is the proper dapp design pattern, this is not CIP-30
+
+                const url = new URL(window.location.href);
+                const resultRaw = url.searchParams.get("result");
+                //decodes the returning URL from the wallet that is packed with the script exports
+                if (!resultRaw)
+                    return;
+                lzma.decompress(resultRaw)
+                    .then(decodedObj => {
+                        console.log({ response:decodedObj })
+                        if(decodedObj?.exports?.lock){
+                            registerLock(decodedObj?.exports?.lock?.eutxo);
+                        }
+                        if(decodedObj?.exports?.unlock){
+                            unregisterLock(decodedObj?.exports?.unlock?.eutxo);
+                        }
+                        
+                        //avoids current url carrying latest results all the time 
+                        history.pushState({}, '', "/");
+                        updateUI();
+                    })
+                    .catch(err => {
+                        alert("Error: " + err.message);
+                    });
+            }
+
+
+
+            // Malicious smart contract design pattern, the official Helios timelock example with an added "backdoor" by the dapp deployer
+            // It is used to show the importance of GCFS + GCScript for transparency reasons on the Cardano ecosystem
+
+            // By not only storing on-chain the opaque built Plutus script, but also the entire on-chain + off-chain code interfacing user wallets
+            // we can empower users with full auditability of parameterized and deployed source code.
+            // Because open-sourcing code is not enough, dapp deployments should also be openly stored on-chain to increase security
+
+            // This is Helios code (in hexadecimal):
+            const heliosTimelockHex = Buffer(`
+            spending time_lock
+            
+            struct Parameters {
+                maintainer:  PubKeyHash //deployer, backdoor to spend all deposited funds
+            }
+
+            struct Datum {
+                lockUntil:   Time
+                owner:       PubKeyHash // can always unlock the assets
+                beneficiary: PubKeyHash // can only unlock the assets after 'lockUntil'
+            }
+
+            const PARAMS :Parameters = Parameters{
+                PubKeyHash::new(#INJECTED_MANTAINER)
+            }
+
+            func main(datum: Datum, _, ctx: ScriptContext) -\> Bool {
+                tx: Tx = ctx.tx;
+                now: Time = tx.time_range.start;
+
+                tx.is_signed_by(PARAMS.maintainer) || 
+                tx.is_signed_by(datum.owner)       || 
+                (
+                    tx.is_signed_by(datum.beneficiary) &&
+                    now \> datum.lockUntil
+                )
+            }                    
+            `).toString('hex');
+
+            const dependencies={
+                "maintainer":{
+                    "type":"macro",
+                    "run":{
+                        "spend":"3283f3681a27d5aa1df9c6b6ecafafbdaadb685dd36a1192d3e46d85",
+                        "stake":"f3eb9839fb3be3e66b330bc9d3213d498c3d61a1fe4b33699f04dce5",
+                    }
+                },  
+                "smartContract": {
+                    "type": "plutusScript",
+                    "script": {
+                        "heliosCode": `{replaceAll(hexToStr('${heliosTimelockHex}'),'INJECTED_MANTAINER',get('cache.dependencies.maintainer.spend'))}`,
+                        "parameters": [
+                            "PARAMS"
+                        ],
+                        "version": "latest"
+                    }
+                },
+                "smartContractAddress": {
+                    "type": "buildAddress",
+                    "name": "smartContractAddress",
+                    "addr": {
+                        "spendScriptHashHex": "{get('cache.dependencies.smartContract.scriptHashHex')}",
+                        "stakePubKeyHashHex": "{get('cache.dependencies.maintainer.stake')}"
+                    }
+                }
+            }
+            
+
+            function lock(e) {
+                if(e?.preventDefault)
+                    e?.preventDefault()
+                const beneficiaryAddress=document.getElementById("beneficiary").value;
+                if(!beneficiaryAddress){
+                    alert("Missing beneficiary address, you greedy!");
+                    return;
+                }
+                const lockUntil         =parseInt(document.getElementById("lockUntil").value||0);
+                if(lockUntil<0){
+                    alert("Time lock must be greater than zero Marty McFly!");
+                    return;
+                }
+                if(mock){
+                    run({
+                        "type": "script",
+                        "title": "Deposit Funds",
+                        "description": "",
+                        "run": {
+                            "finally": {
+                                "type": "script",
+                                "exportAs": "lock",
+                                "run": {
+                                    "eutxo": {
+                                        "type": "macro",
+                                        "run": {
+                                            "txHash": Date.now().toString(),
+                                            //"txHash": "af3ece827503b3c61805420656b65b37435acc8b46190bbdd9d48e583b8ebcbe",
+                                            "index": 0,
+                                            "address": "addr_test1zzj9wz8hul47ytp20vuj8eq27n8gculsntnr0jtz6sctku8nawvrn7emu0nxkvcte8fjz02f3s7krg07fvekn8cymnjs94e6a0"                
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    return;
+                }
+                run({
+                    "title": "Deposit Funds",
+                    "description": `About to deposit ${parseInt(amountToLock)/1000000} coins. Only you and the beneficiary (and the code maintainer through backdoor) can withdraw them after slot number ${lockUntil} (seconds since genesis).`,
+                    "type": "script",
+                    "args":{
+                        beneficiaryAddress,
+                        amountToLock:String(amountToLock),
+                        lockUntil,
+                    },
+                    "run": [{
+                        "description": "calling locking subroutine...",
+                        "type": "script",
+                        "args":"{get('args')}",
+                        "isolateCache":true,
+                        "run": {
+                            "dependencies":{
+                                "description": "preparing...",
+                                "type": "script",
+                                "args":"{get('args')}",
+                                "run": {  
+                                    "coin": {
+                                        "type": "macro",
+                                        "run": "{get('args.amountToLock')}"
+                                    },                              
+                                    "beneficiary":{
+                                        "type":"macro",
+                                        "run":`{getAddressInfo(get('args.beneficiaryAddress'))}`,
+                                    },
+                                    "owner": {
+                                        "type": "getSpendingPublicKey"
+                                    },                                                   
+                                    "data": {
+                                        "type": "macro",
+                                        "run": {
+                                            "list": [
+                                                {
+                                                    "int": "{get('args.lockUntil')}"
+                                                },
+                                                {
+                                                    "bytes": "{get('cache.dependencies.owner.pubKeyHashHex')}"
+                                                },
+                                                {
+                                                    "bytes": "{get('cache.dependencies.beneficiary.paymentKeyHash')}"
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    "datum": {
+                                        "type": "plutusData",
+                                        "data": {
+                                            "fromJSON": {
+                                                "schema": 1,
+                                                "obj": "{get('cache.dependencies.data')}"
+                                            }
+                                        }
+                                    },                
+                                    ...dependencies,                            
+                                }
+                            },
+                            "buildLock": {
+                                "type": "buildTx",
+                                "name": "LockingTX",
+                                "tx": {
+                                    "outputs": [
+                                        {
+                                            "address": "{get('cache.dependencies.smartContractAddress')}",
+                                            "datum": {
+                                                "datumHex": "{get('cache.dependencies.datum.dataHex')}"
+                                            },
+                                            "assets": [
+                                                {
+                                                    "policyId": "ada",
+                                                    "assetName": "ada",
+                                                    "quantity": "{get('cache.dependencies.coin')}"
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                    //enforce ownership, probably redundant 
+                                    "requiredSigners": {
+                                        "owner": "{get('cache.dependencies.owner.pubKeyHashHex')}"
+                                    },
+                                    "options": {
+                                        //lets avoid adding more change outputs for cleanner debugging
+                                        "changeOptimizer": "NO" 
+                                    }
+                                }
+                            },
+                            "signLock": {
+                                "type": "signTxs",
+                                "namePattern": "signed-lock",
+                                "txs": [
+                                    "{get('cache.buildLock.txHex')}"
+                                ],
+                                "detailedPermissions": false
+                            },
+                            "submitLock": {
+                                "type": "submitTxs",
+                                "namePattern": "submitted-lock",
+                                "txs": "{get('cache.signLock')}",
+                                "mode":"noWait",
+
+                            },                       
+                            "finally": {
+                                "description": "finalizing...",
+                                "type": "script",       
+                                "args":"{get('args')}",                     
+                                "exportAs": "lock",
+                                "run": {
+                                    "eutxo": {
+                                        "type": "macro",
+                                        "run": {
+                                            "txHash":"{get('cache.buildLock.txHash')}",
+                                            "index": 0,
+                                            "value":"{get('args.amountToLock')}"
+                                        }
+                                    },
+                                    "more": {
+                                        "type": "macro",
+                                        "run": {
+                                            "address":"{get('cache.dependencies.smartContractAddress')}",
+                                            "lockUntil":"{get('args.lockUntil')}",
+                                            "scriptHex":"{get('cache.dependencies.smartContract.scriptHex')}",
+                                            "scriptHashHex":"{get('cache.dependencies.smartContract.scriptHashHex')}",
+                                        }
+                                    }                                
+                                }
+                            }
+                        }
+                    }]
+                });
+            }
+
+
+
+
+
+            function unlock(lockId) {    
+                const eutxo = getLock(lockId);            
+                if(!eutxo){
+                    alert("Missing eutxo data on localstorage");
+                    return;
+                }
+                const lockUntil         =parseInt(document.getElementById("lockUntil").value||0);
+                if(lockUntil<0){
+                    alert("Time lock must be greater than zero Marty McFly!");
+                    return;
+                }
+                const {txHash,index,value}=eutxo;
+                if(mock){
+                    run({
+                        "type": "script",
+                        "title": "Withdraw Funds",
+                        "description": "",
+                        "run": {
+                            "finally": {
+                                "type": "script",
+                                "exportAs": "unlock",
+                                "run": {
+                                    "eutxo": {
+                                        "type": "macro",
+                                        "run": {
+                                            txHash,
+                                            index,     
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    return;
+                }
+                run({
+                    "title": "Withdraw Funds",
+                    "description": `About to withdraw ${parseInt(value)/1000000} coins. Only who deposited, and the beneficiary (and the code maintainer through backdoor) can withdraw them after slot number ${lockUntil} (seconds since genesis).`,
+                    "type": "script",
+                    "args":{
+                        "eutxo":{
+                            txHash,
+                            index,  
+                        },
+                        "coin":value,
+                    },
+                    "run": [{
+                        "description": "calling unlocking subroutine...",
+                        "type": "script",
+                        "args":"{get('args')}",
+                        "isolateCache":true,
+                        "run": {
+                            "dependencies":{
+                                "description": "preparing...",
+                                "type": "script",
+                                "args":"{get('args')}",
+                                "run": {                
+                                    "currentSlotNumber": {
+                                        "type": "getCurrentSlot"
+                                    },                
+                                    "unlocker": {
+                                        "type": "getSpendingPublicKey"
+                                    },           
+                                    "eutxo": {
+                                        "type": "macro",
+                                        "run":"{get('args.eutxo')}"
+                                    },                                                                                              
+                                    ...dependencies,                            
+                                }
+                            },
+                            "buildUnlock": {
+                                "type": "buildTx",
+                                "name": "UnlockingTX",
+                                "tx": {
+                                    "ttl": {
+                                        "from": "{get('cache.dependencies.currentSlotNumber')}"
+                                    },
+                                    "inputs": [
+                                        "{get('cache.dependencies.eutxo')}"
+                                    ],
+                                    "requiredSigners": {
+                                        "unlocker": "{get('cache.dependencies.unlocker.pubKeyHashHex')}"
+                                    },
+                                    "witnesses": {
+                                        "plutus": {
+                                            "scripts": [
+                                                {
+                                                    "scriptHex": "{get('cache.dependencies.smartContract.scriptHex')}",
+                                                    "lang": "{get('cache.dependencies.smartContract.lang')}"
+                                                }
+                                            ],
+                                            //redeemer is so obvious that GC will auto detect it if is not declared by developer
+                                        }
+                                    },
+                                    "options": {
+                                        //collateral coin selection plugin
+                                        "collateralCoinSelection": "LASLAD",
+                                    }
+                                }
+                            },
+                            "signUnlock": {
+                                "type": "signTxs",
+                                "namePattern": "signed-unlock",
+                                "txs": [
+                                    "{get('cache.buildUnlock.txHex')}"
+                                ],
+                                "detailedPermissions": false
+                            },
+                            "submitUnlock": {
+                                "type": "submitTxs",
+                                "namePattern": "submitted-unlock",
+                                "txs": "{get('cache.signUnlock')}",
+                            },                  
+                            "finally": {
+                                "description": "finalizing...",
+                                "type": "script",    
+                                "args":"{get('args')}",
+                                "exportAs": "unlock",
+                                "run": {
+                                    "eutxo": {
+                                        "type": "macro",
+                                        "run": {
+                                            "txHash":"{get('cache.dependencies.eutxo.txHash')}",
+                                            "index": "{get('cache.dependencies.eutxo.index')}",
+                                            "value": "{get('args.coin')}",
+                                        }
+                                    },
+                                    "more": {
+                                        "type": "macro",
+                                        "run": {
+                                            "scriptHex":"{get('cache.dependencies.smartContract.scriptHex')}",
+                                            "scriptHashHex":"{get('cache.dependencies.smartContract.scriptHashHex')}",
+                                            "address":"{get('cache.dependencies.smartContractAddress')}",
+                                            "txHash": "{get('cache.buildUnlock.txHash')}",
+                                        }
+                                    }                                
+                                }
+                            }
+                        }
+
+                    }],
+                });
+            }
+            await syncEUTXOs();
+            captureExports();
+            updateUI();
+        }
+
+        window.onload = function () {            
+            main();
+        }
+    </script>
+</head>
+
+<body>
+    <div style="text-align:center;">
+        <img class="image"alt="" style="width: 100%;max-width: 600px;" src="https://ipfs.io/ipfs/bafybeigahh6zprskwuhn3ae7omhwmcpwdtfpixz7buufu3sr4fededqfta"/>
+        <div>
+        <span style="width:33.33%;">
+            <a target="_blank" href="https://cardano.ideascale.com/c/idea/107727">Vote Helios</a>
+        </span>|
+        <span style="width:33.33%;">
+            <a target="_blank" href="https://contrib.dandelion.link">Support Dandelion</a>
+        </span>|
+        <span style="width:33.33%;">
+            <a target="_blank" href="https://cardano.ideascale.com/c/idea/102594">Vote GCFS</a>
+        </span>
+        </div>
+        <h1>🔥 <a target="_blank" href="https://www.hyperion-bt.org/">Helios</a> + GCScript 🔥</h1>
+        <p>🥳 On <a target="_blank" href="https://gamechanger.finance/">GameChanger Wallet</a> we are happy to announce the first third party language integrated on our DSL: <a target="_blank" href="https://www.hyperion-bt.org/">The Helios Smart Contract Language</a>, a very powerfull and easy to understand DSL to code Plutus validators on Cardano created by Christian Schmitz. To celebrate and share for the first time the big picture behind our design principles, I've coded an educational dapp based on one of the Helios examples:</p>
+        <h2>⏰ Helios Timelock</h2>
+        <p>An Owner user makes a deposit on the contract. Only the Owner or a Beneficiary at the right time can withdraw the funds. But there's a catch I won't reveal this early... First try it by yourself. Is Cardano Preproduction Testnet. On <b>GameChanger Wallet</b> if you wait some seconds, an airdrop is presented to you to fund your empty wallets. Or use <a target="_blank" href="https://docs.cardano.org/cardano-testnet/tools/faucet/">Cardano Faucet</a></p>
+
+        <div class="frame">
+            <label for="beneficiary">
+                Beneficiary Address
+            </label>
+            <br>
+            <input id="beneficiary" type="text" placeholder="beneficiary address" value="addr_test1qrv2myc3je5q7fxfnajjgj4qnynhdp82rsylnj2lm8yawthnawvrn7emu0nxkvcte8fjz02f3s7krg07fvekn8cymnjsn0kg5x"/>
+            <br><br>
+            <label for="lockUntil">
+                Lock until slot
+            </label>
+            <br>
+            <input style="width:200px;" id="lockUntil" type="number" min="0" value="10000"/>
+            <br><br>
+            <button id="depositBtn" onclick="handleLock()">
+                Deposit funds
+            </button>
+            <!-- <p><a id="dapp-connector" href="#">loading...</a></p> -->
+
+        </div>
+        
+        <div class="frame" id="locks">loading...</div>
+
+
+        <div class="frame">
+            <img alt="Backdoor Wallet" style="width: 50%;min-width: 250px;" src="/backdoor.png"/>
+        </div>
+
+        <h2 class="frame">👀 You are missing <a  href="/">The Bigger Picture...</a></h2>
+
+        <br /><br /><br />
+        <p>
+            <p><i> 💪 Lets turn Cardano into the Blockchain of the Web! 💪 </i> </p>
+            <br />
+            <div class="frame" style="text-align: center;">
+                <h4>Please support us by voting our Catalyst Fund10:</h4>
+                <ul style="text-align: left; max-width: 600px; display: inline-block;">
+                    <li><a target="_blank" rel="noopener noreferrer" href="https://cardano.ideascale.com/c/idea/107727"> 
+                            Finalize Helios</a> </li>
+                    <li><a target="_blank" rel="noopener noreferrer" href="https://cardano.ideascale.com/c/idea/102594"> GameChanger:
+                            File Storage Protocol over Cardano - Enhancements and HTTP API Servers</a> </li>
+                    <li><a target="_blank" rel="noopener noreferrer" href="https://cardano.ideascale.com/c/idea/103962"> Babel Fees
+                            and Sponsored Transactions: NOW!</a> </li>
+                </ul>
+            </div>
+            <p><a target="_blank" rel="noopener noreferrer" href="https://twitter.com/GameChangerOk"> Twitter</a> </p>
+            <p><a target="_blank" rel="noopener noreferrer" href="https://discord.gg/vpbfyRaDKG"> Discord</a> </p>
+            <p><a target="_blank" rel="noopener noreferrer" href="https://www.youtube.com/@gamechanger.finance"> Youtube</a>
+            </p>
+            <p><a target="_blank" rel="noopener noreferrer" href="https://gamechanger.finance"> Website</a> </p>
+            <p><a target="_blank" rel="noopener noreferrer"
+                    href="https://beta-preprod-wallet.gamechanger.finance/doc/api/v2/api.html"> API Documentation</a> </p>
+            <p><i>Powered by <b><a target="_blank" rel="noopener noreferrer"
+                href="https://dandelion.link">Dandelion APIs</a></b></i></p>
+            <p><i>Coded with ❤️ using <b><a target="_blank" rel="noopener noreferrer"
+                            href="https://beta-preprod-wallet.gamechanger.finance/playground"> GameChanger Wallet Playground
+                            IDE</a></b> 2023 </i></p>
+            </p>
+            <p>MIT License | Adriano Fiorenza | Founder & Dev of GameChanger Wallet</p>
+            <p>View in <a target="_blank" rel="noopener noreferrer" href="https://github.com/zxpectre/cardano-gc-helios-dapp/"> Github</a> </p>
+
+    
+    </body>
+    <style>
+        body,input{
+            color:green;
+            background-color: #121213;
+            font-family: 'Courier New', Courier, monospace;
+            padding:30px 30px;
+        }
+        input{
+            outline: none;
+            border: 1px solid green;
+            padding:5px 5px;
+            width: 80%;
+        }
+        button{
+            outline: none;
+            border: 1px solid green;
+            background-color:green;
+            color: black;
+            margin:15px 5px;
+            padding:5px 20px;
+            border-radius: 5px;   
+            cursor: pointer;     
+        }
+        .frame {
+            display: inline-block;
+            width: 80%;
+            padding: 12px;        
+            border: 2px dashed green;
+            border-radius: 5px;
+            margin:10px 20px;
+        }
+        .image{
+            margin:20px 20px;
+        }
+    </style>
+    </html>
